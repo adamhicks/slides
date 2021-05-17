@@ -1,0 +1,168 @@
+# Scaling down?! ⬇
+Reducing CPU for the greater good
+Tags: go, optimise, lecture
+
+Adam Hicks
+13 May 2021
+ahicks@luno.com
+https://github.com/adamhicks
+
+## What's wrong?
+
+- Two microservices constantly at max instances
+- Unable to ramp up on demand
+- Using excessive resource in quieter times
+
+.image images/replicas.png 300 _
+
+: exchange match and api stuck at maximum number of instances/replicas for majority of the time
+: if it's maxed out then we can't add more when demand continues to go up
+: we have a max of 36 replicas which is around the same as fe
+: fe is averaging around 10-15 replicas so we're a high resource consumer
+
+## What are they doing?
+
+- Order Book
+    - for a single market e.g. BTC/ZAR
+    - two lists of orders
+    - bids, all the orders for people buying BTC
+    - asks, all the orders for people selling BTC
+- Every time an order is placed, add it
+- Every time an order is cancelled, remove it
+
+: exchange-api provides API endpoints for the entire exchange product
+: exchange-match is focused on live trading information
+: specifically, order books need to be kept up to date with every order posted and cancelled
+
+## CPU whodunnit?
+
+.image images/trace.png _ 300
+.caption Looks like we're spending all the time in `flattenOrderheap()`
+
+Let's take a closer look at that function...
+
+: let's take a look at the CPU usage of one of the match pods to figure out what's using the most time
+: from the trace it looks like most of the time is spent calling this function flattenOrderheap
+: to figure out how to make this faster let's first go over what the function is doing
+
+## Heap
+
+- Tree structure with maximum element at the root
+- min-lookup: O(`1`)
+- insert element: O(`log n`)
+- delete element: O(`log n`)
+
+.image images/heap.png 300 _
+
+: useful data structure for storing data where one item is much more important than most others
+: constant lookup time for the item with minimum value
+: useful for order books
+
+## Order Heap
+
+- Bids: Highest price heap
+- Asks: Lowest price heap
+
+.play -edit code/heap/main.go /START OMIT/,/END OMIT/
+
+: instant access to the order with the best price
+: can quickly get the relevant order to determine trades
+
+## Flatten Order Heaps?
+
+Need to get a `[]Order` where each element increases in price
+
+.play -edit code/sort/main.go /START OMIT/,/END OMIT/
+
+`sort.Slice` = quicksort = O(`n log n`) 😅
+
+Every event - 10,000s of orders to flatten
+
+60 events/second
+
+CPU Load 📈 🔥 🚒
+
+: exchange-match needs to present sorted arrays for clients
+: we're converting from a heap to a slice
+: every event so that the order book is kept up to date
+: n log n work every event, 60 events per second
+
+## Ideas?
+
+Can we avoid using sort on the order heap?
+
+Can we reduce the number of times we do it?
+
+Can we cache something?
+
+## On Demand
+
+Heap in memory, flatten on request
+
+- [+] Zero work on Event
+- [+] Independent request goroutines
+- [-] Popular markets have more requests
+- [-] 500 requests/second (10x more than events)
+
+: what if we don't format the order books on exchange event but rather when needed by the client
+: handling of each request just needs the heap state and then can do the flatten work in a request specific goroutine
+: requests for order book data is much more common than posting of orders
+
+## Sampling
+
+Flatten every market once every 100 milliseconds
+
+- [+] Constant load
+- [+] Save CPU on busy markets
+- [+] Simple to understand
+- [-] More client lag
+
+: predictable load, same amount of work to do regularly
+: if there's more than one update every 100 ms for a market we can skip them
+: only get new updates once the flatten happens
+
+## 😞
+
+.image images/fail.png _ 600
+
+All markets 10/s > One market 60/s
+
+Need a new plan...
+
+: deployed here and instantly saw high cpu usage and max replicas
+: actually tried every 10 milliseconds before
+: would need to sample more like every 2-5 seconds just to get equal performance
+
+## Keep track
+
+Array instead of Heap
+
+- Flatten on initialisation
+- On Create -> Insert into array O(`n`)
+- On Cancel -> Delete from array O(`n`)
+- *Also*, on Trade -> Modify/Delete first `n` (`n = len(trades)`) orders
+
+.image images/events.png 300 _
+
+## 😕
+
+.image images/steady-cpu.png 300 _
+
+No change. Did it work!?
+
+: expected the cpu to go down
+
+## 😊
+
+.image images/awyeah.png 300 _
+
+Replicas scaled down from 36 to 10
+
+Yay!
+
+*(Why did CPU not go down?)*
+
+## Links
+.link https://en.wikipedia.org/wiki/Heap_(data_structure) heap (Wikipedia)
+.link https://golang.org/pkg/container/heap/ implementation (golang)
+
