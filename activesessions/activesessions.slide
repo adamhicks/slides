@@ -1,0 +1,123 @@
+# Concurrent Session Limits
+Restricting User WebSocket streams
+Tags: go, redis, lecture
+
+Adam Hicks
+29 July 2021
+ahicks@luno.com
+https://github.com/adamhicks
+
+## Problem
+
+WebSocket APIs use Backend resources
+
+Unlimited streams will have performance impact
+
+Bad actors could DoS
+
+## Rate Limiting
+
+Count streams created _(per minute)_
+
+Excess streams rejected
+
+- Easy to implement
+- Fire and forget
+
+But!
+- Users can keep opening more streams ☹️
+
+## Active Sessions
+
+Keep track of each users active streams
+- Alice - 5 streams
+- Bob - 7 streams
+- Carol - 1 stream
+
+Monitoring: Useful to know
+
+Stateful: Need to know when a stream becomes inactive
+
+## Redis Integer
+
+**User ID** -> **Stream Count**
+
++1 on opening stream
+
+-1 on closing stream
+
+Pros:
+- Simple
+
+Cons:
+- Not robust
+- No history
+
+: Redis is a Key-Value store
+: Values can be a variety of different types
+: not robust because if a stream gets lost due to some bug we never decrement the number
+: Redis supports atomic operations
+: INCR is atomic
+
+## Sorted Sets
+
+From [redis.io](http://redis.io/topics/data-types)
+>Redis Sorted Sets are, similarly to Redis Sets, non repeating collections of Strings. The difference is that every member of a Sorted Set is associated with score, that is used in order to take the sorted set ordered, from the smallest to the greatest score. While members are unique, scores may be repeated.
+
+List of (Item, Score) Sorted by **Score**
+
+```
+fruit: [
+    5 apple,
+    1 orange,
+]
+
+Add "fruit" "banana" 3
+
+fruit: [
+    5 apple,
+    3 banana,
+    1 orange,
+]
+```
+
+: Different Redis value type
+: Instead of key->integer, key->sorted set
+
+## Implementation
+
+User ID as key
+
+Generate a unique stream ID for each new stream
+
+"Score" a unix timestamp some time in the future
+
+.image images/timeline.png 180 _
+
+## Keep Alive
+
+Every 10 seconds, set expiry to 20 seconds in the **future**
+
+If a stream ends unexpectedly, will expire after 20 seconds
+
+.image images/expiry.png 250 _
+
+## Active Count
+
+Get count of objects with score > now
+
+.image images/cutoff.png 250 _
+
+## Summary
+
+WebSocket streams limited by active count
+
+Redis Sorted Sets
+- Robust
+- Quick
+- Scalable
+
+Session history
+- By day
+- By month
+- By user
